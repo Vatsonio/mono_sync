@@ -1,0 +1,16 @@
+.git
+.github
+docs
+tests
+.planning
+__pycache__
+*.pyc
+*.db
+*.sqlite3
+.env
+.env.*
+.venv
+venv
+.pytest_cache
+.idea
+.vscode
