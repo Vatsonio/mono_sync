@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import logging
+import time
 
 import requests
 
 log = logging.getLogger(__name__)
+
+_CONNECT_TIMEOUT = 10
+_MAX_RETRIES = 3
 
 
 class FireflyError(Exception):
@@ -13,9 +17,13 @@ class FireflyError(Exception):
 
 
 class FireflyClient:
-    def __init__(self, base_url: str, token: str, *, session: requests.Session | None = None):
+    def __init__(self, base_url: str, token: str, *, session: requests.Session | None = None,
+                 timeout: int = 60, apply_rules: bool = True, sleep=time.sleep):
         self._base = base_url.rstrip("/")
         self._session = session or requests.Session()
+        self._timeout = (_CONNECT_TIMEOUT, int(timeout))
+        self._apply_rules = bool(apply_rules)
+        self._sleep = sleep
         self._headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/json",
@@ -24,10 +32,24 @@ class FireflyClient:
 
     def _request(self, method: str, path: str, **kwargs) -> dict:
         url = f"{self._base}{path}"
-        resp = self._session.request(method, url, headers=self._headers, timeout=30, **kwargs)
-        if 200 <= resp.status_code < 300:
-            return resp.json() if resp.content else {}
-        raise FireflyError(f"firefly {method} {path} -> {resp.status_code}: {resp.text[:500]}")
+        last_error: str | None = None
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                resp = self._session.request(method, url, headers=self._headers, timeout=self._timeout, **kwargs)
+            except requests.RequestException as exc:
+                last_error = f"network error: {exc}"
+                log.warning("firefly %s %s %s (%d/%d)", method, path, last_error, attempt, _MAX_RETRIES)
+                if attempt < _MAX_RETRIES:
+                    self._sleep(5 * attempt)
+                continue
+            if 200 <= resp.status_code < 300:
+                return resp.json() if resp.content else {}
+            if resp.status_code >= 500 and attempt < _MAX_RETRIES:
+                log.warning("firefly %s %s -> %d (%d/%d); retrying", method, path, resp.status_code, attempt, _MAX_RETRIES)
+                self._sleep(5 * attempt)
+                continue
+            raise FireflyError(f"firefly {method} {path} -> {resp.status_code}: {resp.text[:500]}")
+        raise FireflyError(f"firefly {method} {path} failed after {_MAX_RETRIES} attempts: {last_error}")
 
     # --- accounts ---
     def find_asset_account(self, name: str) -> dict | None:
@@ -74,7 +96,7 @@ class FireflyClient:
         return {"id": items[0]["id"], **items[0]["attributes"]}
 
     def create_transaction(self, tx: dict) -> dict:
-        body = {"error_if_duplicate_hash": False, "apply_rules": True, "fire_webhooks": False, "transactions": [tx]}
+        body = {"error_if_duplicate_hash": False, "apply_rules": self._apply_rules, "fire_webhooks": False, "transactions": [tx]}
         data = self._request("POST", "/api/v1/transactions", json=body)
         return {"id": data["data"]["id"], **data["data"]["attributes"]}
 
@@ -83,6 +105,6 @@ class FireflyClient:
         splits = current["data"]["attributes"]["transactions"]
         updated = dict(tx)
         updated["transaction_journal_id"] = splits[0]["transaction_journal_id"]
-        body = {"apply_rules": True, "fire_webhooks": False, "transactions": [updated]}
+        body = {"apply_rules": self._apply_rules, "fire_webhooks": False, "transactions": [updated]}
         data = self._request("PUT", f"/api/v1/transactions/{group_id}", json=body)
         return {"id": data["data"]["id"], **data["data"]["attributes"]}

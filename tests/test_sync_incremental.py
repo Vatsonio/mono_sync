@@ -1,3 +1,5 @@
+import json
+
 from mono_sync import mapping
 from mono_sync.sync import Syncer
 from tests.fakes import FakeMonobankClient, make_config
@@ -67,6 +69,31 @@ def test_incremental_retries_failed_transaction_next_cycle(store, fake_firefly):
     syncer.incremental_cycle()
     assert store.get_transaction("f1")["status"] == "ok"
     assert fake_firefly.created_tx_count == 1
+
+
+def test_retry_failed_recovers(store, fake_firefly):
+    _mapped(store)
+    item = _item("f1", NOW - 3 * 86400, -2500, 90000)
+    store.upsert_transaction(mono_tx_id="f1", mono_account_id="uah", firefly_tx_id=None,
+                             time=item["time"], amount_minor=item["amount"], balance_minor=item["balance"],
+                             hash=mapping.transaction_hash(item), status="failed",
+                             raw_json=json.dumps(item, separators=(",", ":"), sort_keys=True))
+    syncer, _ = _syncer(store, fake_firefly, {"uah": []})
+    syncer.retry_failed()
+    assert fake_firefly.created_tx_count == 1
+    rec = store.get_transaction("f1")
+    assert rec["status"] == "ok"
+    assert rec["firefly_tx_id"] is not None
+
+
+def test_retry_failed_skips_rows_without_raw_json(store, fake_firefly):
+    _mapped(store)
+    store.upsert_transaction(mono_tx_id="f1", mono_account_id="uah", firefly_tx_id=None,
+                             time=NOW - 86400, amount_minor=-1, balance_minor=1, hash="h", status="failed")
+    syncer, _ = _syncer(store, fake_firefly, {"uah": []})
+    syncer.retry_failed()  # must not raise
+    assert fake_firefly.created_tx_count == 0
+    assert store.get_transaction("f1")["status"] == "failed"
 
 
 def test_reconcile_warns_on_balance_mismatch(store, fake_firefly, caplog):

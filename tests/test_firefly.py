@@ -1,13 +1,14 @@
-import json
-
 import pytest
+import requests
 
 from mono_sync.firefly import FireflyClient, FireflyError
 from tests.fakes import FakeResponse, FakeSession
 
 
-def _client(responses):
-    return FireflyClient("http://app:8080/", "ff-token", session=FakeSession(responses))
+def _client(responses, **over):
+    kwargs = dict(session=FakeSession(responses), sleep=lambda _s: None)
+    kwargs.update(over)
+    return FireflyClient("http://app:8080/", "ff-token", **kwargs)
 
 
 def test_request_sets_auth_header():
@@ -85,3 +86,42 @@ def test_get_account_balance():
     session = FakeSession([FakeResponse(200, json_data={"data": {"id": "9", "attributes": {"current_balance": "123.45"}}})])
     client = FireflyClient("http://app:8080", "t", session=session)
     assert client.get_account_balance("9") == pytest.approx(123.45)
+
+
+def test_request_retries_on_network_error_then_succeeds():
+    session = FakeSession([requests.exceptions.ReadTimeout("slow"),
+                           FakeResponse(200, json_data={"data": []})])
+    out = FireflyClient("http://app:8080", "t", session=session, sleep=lambda _s: None).find_transaction_by_external_id("x")
+    assert out is None  # data was empty -> None
+    assert len(session.calls) == 2  # retried once
+
+
+def test_request_wraps_persistent_network_error_in_firefly_error():
+    session = FakeSession([requests.exceptions.ConnectionError("down")] * 3)
+    client = FireflyClient("http://app:8080", "t", session=session, sleep=lambda _s: None)
+    with pytest.raises(FireflyError, match="failed after 3 attempts"):
+        client.get_account_balance("9")
+    assert len(session.calls) == 3
+
+
+def test_request_retries_on_5xx_then_succeeds():
+    session = FakeSession([FakeResponse(503, text="busy"),
+                           FakeResponse(200, json_data={"data": {"id": "9", "attributes": {"current_balance": "1.00"}}})])
+    bal = FireflyClient("http://app:8080", "t", session=session, sleep=lambda _s: None).get_account_balance("9")
+    assert bal == pytest.approx(1.00)
+    assert len(session.calls) == 2
+
+
+def test_request_does_not_retry_4xx():
+    session = FakeSession([FakeResponse(422, text="bad")])
+    client = FireflyClient("http://app:8080", "t", session=session, sleep=lambda _s: None)
+    with pytest.raises(FireflyError, match="422"):
+        client.create_transaction({"type": "withdrawal"})
+    assert len(session.calls) == 1  # no retry on a 4xx
+
+
+def test_apply_rules_can_be_disabled():
+    session = FakeSession([FakeResponse(200, json_data={"data": {"id": "1", "attributes": {}}})])
+    client = FireflyClient("http://app:8080", "t", session=session, apply_rules=False)
+    client.create_transaction({"type": "withdrawal", "amount": "1.00"})
+    assert session.calls[0][2]["json"]["apply_rules"] is False

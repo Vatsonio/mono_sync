@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS transactions (
     amount_minor    INTEGER NOT NULL,
     balance_minor   INTEGER,
     hash            TEXT NOT NULL,
-    status          TEXT NOT NULL DEFAULT 'ok'
+    status          TEXT NOT NULL DEFAULT 'ok',
+    raw_json        TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_transactions_account_time ON transactions(mono_account_id, time);
 CREATE TABLE IF NOT EXISTS sync_state (
@@ -41,7 +42,16 @@ class Store:
         self._conn = sqlite3.connect(db_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        # Add columns introduced after the initial schema. ALTER TABLE ADD COLUMN is a no-op-safe
+        # migration; OperationalError means the column already exists.
+        try:
+            self._conn.execute("ALTER TABLE transactions ADD COLUMN raw_json TEXT")
+        except sqlite3.OperationalError:
+            pass
 
     def close(self) -> None:
         self._conn.close()
@@ -95,11 +105,11 @@ class Store:
         ).fetchone()
 
     def upsert_transaction(self, *, mono_tx_id, mono_account_id, firefly_tx_id, time,
-                           amount_minor, balance_minor, hash, status="ok") -> None:
+                           amount_minor, balance_minor, hash, status="ok", raw_json=None) -> None:
         self._conn.execute(
             """INSERT INTO transactions (mono_tx_id, mono_account_id, firefly_tx_id, time,
-                                         amount_minor, balance_minor, hash, status)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                         amount_minor, balance_minor, hash, status, raw_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(mono_tx_id) DO UPDATE SET
                    mono_account_id = excluded.mono_account_id,
                    firefly_tx_id   = excluded.firefly_tx_id,
@@ -107,9 +117,10 @@ class Store:
                    amount_minor    = excluded.amount_minor,
                    balance_minor   = excluded.balance_minor,
                    hash            = excluded.hash,
-                   status          = excluded.status""",
+                   status          = excluded.status,
+                   raw_json        = COALESCE(excluded.raw_json, transactions.raw_json)""",
             (mono_tx_id, mono_account_id, firefly_tx_id, int(time), int(amount_minor),
-             None if balance_minor is None else int(balance_minor), hash, status),
+             None if balance_minor is None else int(balance_minor), hash, status, raw_json),
         )
         self._conn.commit()
 
@@ -118,6 +129,11 @@ class Store:
             "SELECT * FROM transactions WHERE mono_account_id = ? ORDER BY time ASC LIMIT 1",
             (mono_account_id,),
         ).fetchone()
+
+    def failed_transactions(self) -> list:
+        return list(self._conn.execute(
+            "SELECT * FROM transactions WHERE status = 'failed' ORDER BY time ASC"
+        ))
 
     # --- sync_state ---
     def get_state(self, key) -> str | None:

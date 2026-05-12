@@ -14,6 +14,8 @@ def test_defaults():
     assert cfg.monobank_token == "m-token"
     assert cfg.firefly_url == "http://app:8080"  # trailing slash stripped
     assert cfg.firefly_token == "f-token"
+    assert cfg.firefly_timeout == 60
+    assert cfg.firefly_apply_rules is True
     assert cfg.poll_interval_minutes == 5
     assert cfg.backfill is True
     assert cfg.backfill_floor_date == "2023-05-01"
@@ -25,13 +27,16 @@ def test_defaults():
 
 def test_overrides():
     cfg = load_config(_env(POLL_INTERVAL_MINUTES="15", BACKFILL="false", MCC_CATEGORIES="yes",
-                           BACKFILL_FLOOR_DATE="2020-01-01", LOG_LEVEL="debug", DB_PATH="/tmp/x.db"))
+                           BACKFILL_FLOOR_DATE="2020-01-01", LOG_LEVEL="debug", DB_PATH="/tmp/x.db",
+                           FIREFLY_TIMEOUT_SECONDS="120", FIREFLY_APPLY_RULES="false"))
     assert cfg.poll_interval_minutes == 15
     assert cfg.backfill is False
     assert cfg.mcc_categories is True
     assert cfg.backfill_floor_date == "2020-01-01"
     assert cfg.log_level == "debug"
     assert cfg.db_path == "/tmp/x.db"
+    assert cfg.firefly_timeout == 120
+    assert cfg.firefly_apply_rules is False
 
 
 def test_missing_required():
@@ -47,3 +52,10 @@ def test_bad_floor_date():
 def test_bad_poll_interval():
     with pytest.raises(RuntimeError, match="POLL_INTERVAL_MINUTES"):
         load_config(_env(POLL_INTERVAL_MINUTES="0"))
+
+
+def test_bad_firefly_timeout():
+    with pytest.raises(RuntimeError, match="FIREFLY_TIMEOUT_SECONDS"):
+        load_config(_env(FIREFLY_TIMEOUT_SECONDS="0"))
+    with pytest.raises(RuntimeError, match="FIREFLY_TIMEOUT_SECONDS"):
+        load_config(_env(FIREFLY_TIMEOUT_SECONDS="abc"))

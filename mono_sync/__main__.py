@@ -24,18 +24,23 @@ def main() -> None:
     cfg = load_config()
     _setup_logging(cfg.log_level)
     log = logging.getLogger("mono_sync")
-    log.info("starting; poll=%dm backfill=%s floor=%s tz=%s",
-             cfg.poll_interval_minutes, cfg.backfill, cfg.backfill_floor_date, cfg.timezone)
+    log.info("starting; poll=%dm backfill=%s floor=%s tz=%s firefly_timeout=%ds apply_rules=%s",
+             cfg.poll_interval_minutes, cfg.backfill, cfg.backfill_floor_date, cfg.timezone,
+             cfg.firefly_timeout, cfg.firefly_apply_rules)
 
     store = Store(cfg.db_path)
     limiter = RateLimiter(_MONOBANK_MIN_INTERVAL)
     mono = MonobankClient(cfg.monobank_token, limiter)
-    firefly = FireflyClient(cfg.firefly_url, cfg.firefly_token)
+    firefly = FireflyClient(cfg.firefly_url, cfg.firefly_token,
+                            timeout=cfg.firefly_timeout, apply_rules=cfg.firefly_apply_rules)
     syncer = Syncer(mono, firefly, store, cfg)
 
-    syncer.ensure_accounts()
-    if cfg.backfill:
-        syncer.run_backfill()
+    try:
+        syncer.ensure_accounts()
+        if cfg.backfill:
+            syncer.run_backfill()
+    except Exception:  # noqa: BLE001 - never crash-loop on startup; the incremental loop picks up the rest
+        log.exception("account setup / backfill failed; proceeding to incremental loop anyway")
 
     interval = cfg.poll_interval_minutes * 60
     log.info("entering incremental loop")

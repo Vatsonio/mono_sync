@@ -17,6 +17,8 @@ class Config:
     monobank_token: str
     firefly_url: str
     firefly_token: str
+    firefly_timeout: int
+    firefly_apply_rules: bool
     poll_interval_minutes: int
     backfill: bool
     backfill_floor_date: str
@@ -42,6 +44,13 @@ def load_config(env: dict | None = None) -> Config:
     if poll < 1:
         raise RuntimeError("POLL_INTERVAL_MINUTES must be >= 1")
 
+    try:
+        ff_timeout = int(env.get("FIREFLY_TIMEOUT_SECONDS", "60"))
+    except ValueError as exc:
+        raise RuntimeError(f"FIREFLY_TIMEOUT_SECONDS must be an integer: {exc}") from exc
+    if ff_timeout < 1:
+        raise RuntimeError("FIREFLY_TIMEOUT_SECONDS must be >= 1")
+
     floor = (env.get("BACKFILL_FLOOR_DATE") or "2023-05-01").strip()
     try:
         datetime.strptime(floor, "%Y-%m-%d")
@@ -52,6 +61,8 @@ def load_config(env: dict | None = None) -> Config:
         monobank_token=required("MONOBANK_TOKEN"),
         firefly_url=required("FIREFLY_URL").rstrip("/"),
         firefly_token=required("FIREFLY_TOKEN"),
+        firefly_timeout=ff_timeout,
+        firefly_apply_rules=_as_bool(env.get("FIREFLY_APPLY_RULES", "true")),
         poll_interval_minutes=poll,
         backfill=_as_bool(env.get("BACKFILL", "true")),
         backfill_floor_date=floor,

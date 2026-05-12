@@ -1,6 +1,7 @@
 """Sync orchestration: account setup, historical backfill, incremental polling, reconciliation."""
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import datetime, timedelta
@@ -19,6 +20,14 @@ _COUNTERPARTY_NAME = "Monobank"   # single shared expense/revenue account
 
 def _asset_account_name(currency_alpha: str) -> str:
     return "Monobank Black" if currency_alpha == "UAH" else f"Monobank Black {currency_alpha}"
+
+
+def _dedup_by_id(items: list) -> list:
+    """Collapse statement items sharing the same id (e.g. one sitting on a split-window boundary)."""
+    by_id: dict[str, dict] = {}
+    for item in items:
+        by_id[str(item["id"])] = item
+    return list(by_id.values())
 
 
 class Syncer:
@@ -65,6 +74,7 @@ class Syncer:
         """
         mono_id = str(item["id"])
         new_hash = mapping.transaction_hash(item)
+        raw = json.dumps(item, separators=(",", ":"), sort_keys=True)
         existing = self.store.get_transaction(mono_id)
         if existing is not None and existing["hash"] == new_hash and existing["status"] == "ok":
             return "skipped"
@@ -95,25 +105,51 @@ class Syncer:
             self.store.upsert_transaction(
                 mono_tx_id=mono_id, mono_account_id=account_row["mono_account_id"], firefly_tx_id=None,
                 time=item["time"], amount_minor=item["amount"], balance_minor=item.get("balance"),
-                hash=new_hash, status="failed",
+                hash=new_hash, status="failed", raw_json=raw,
             )
             return "failed"
 
         self.store.upsert_transaction(
             mono_tx_id=mono_id, mono_account_id=account_row["mono_account_id"], firefly_tx_id=ff_id,
             time=item["time"], amount_minor=item["amount"], balance_minor=item.get("balance"),
-            hash=new_hash, status="ok",
+            hash=new_hash, status="ok", raw_json=raw,
         )
         return outcome
 
+    # ------------------------------------------------------------------ retry of previously-failed items
+    def retry_failed(self) -> None:
+        rows = self.store.failed_transactions()
+        if not rows:
+            return
+        accounts = {a["mono_account_id"]: a for a in self.store.all_accounts()}
+        recovered = still_failing = 0
+        for row in rows:
+            acc = accounts.get(row["mono_account_id"])
+            raw = row["raw_json"]
+            if acc is None or not raw:
+                continue
+            try:
+                item = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if self._ingest_item(acc, item) == "failed":
+                still_failing += 1
+            else:
+                recovered += 1
+        log.info("retry_failed: %d recovered, %d still failing", recovered, still_failing)
+
     # ------------------------------------------------------------------ statement fetching
     def _fetch_chunk(self, account_id: str, frm: int, to: int) -> list:
-        """Fetch all statement items in [frm, to], splitting the window if Monobank caps the response at 500."""
+        """Fetch all statement items in [frm, to].
+
+        Splits the window in half and recurses if Monobank caps the response at 500 items, and
+        de-duplicates by item id so a transaction landing on a split boundary is processed once.
+        """
         items = self.mono.statement(account_id, frm, to)
         if len(items) >= 500 and (to - frm) > 1:
             mid = frm + (to - frm) // 2
-            return self._fetch_chunk(account_id, frm, mid) + self._fetch_chunk(account_id, mid, to)
-        return items
+            items = self._fetch_chunk(account_id, frm, mid) + self._fetch_chunk(account_id, mid, to)
+        return _dedup_by_id(items)
 
     # ------------------------------------------------------------------ backfill
     def run_backfill(self) -> None:
@@ -158,6 +194,7 @@ class Syncer:
 
     # ------------------------------------------------------------------ incremental
     def incremental_cycle(self) -> None:
+        self.retry_failed()
         for acc in self.store.all_accounts():
             self._incremental_account(acc)
         self._maybe_reconcile()

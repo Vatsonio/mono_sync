@@ -81,3 +81,25 @@ def test_sync_state(store):
     assert store.get_state("k") == "v1"
     store.set_state("k", "v2")
     assert store.get_state("k") == "v2"
+
+
+def test_raw_json_round_trips_and_is_preserved(store):
+    store.upsert_transaction(mono_tx_id="t1", mono_account_id="a", firefly_tx_id="100",
+                             time=1000, amount_minor=-500, balance_minor=9500, hash="h1",
+                             raw_json='{"id":"t1","amount":-500}')
+    assert store.get_transaction("t1")["raw_json"] == '{"id":"t1","amount":-500}'
+    # upsert again without raw_json -> the stored JSON is kept (COALESCE)
+    store.upsert_transaction(mono_tx_id="t1", mono_account_id="a", firefly_tx_id="100",
+                             time=1000, amount_minor=-500, balance_minor=9500, hash="h1", status="failed")
+    assert store.get_transaction("t1")["raw_json"] == '{"id":"t1","amount":-500}'
+
+
+def test_failed_transactions(store):
+    store.upsert_transaction(mono_tx_id="ok1", mono_account_id="a", firefly_tx_id="1",
+                             time=200, amount_minor=1, balance_minor=1, hash="h", status="ok")
+    store.upsert_transaction(mono_tx_id="bad2", mono_account_id="a", firefly_tx_id=None,
+                             time=100, amount_minor=2, balance_minor=2, hash="h", status="failed", raw_json="{}")
+    store.upsert_transaction(mono_tx_id="bad1", mono_account_id="a", firefly_tx_id=None,
+                             time=50, amount_minor=3, balance_minor=3, hash="h", status="failed", raw_json="{}")
+    failed = store.failed_transactions()
+    assert [r["mono_tx_id"] for r in failed] == ["bad1", "bad2"]  # ordered by time ASC

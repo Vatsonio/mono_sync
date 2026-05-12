@@ -19,24 +19,35 @@ class FakeResponse:
 
 
 class FakeSession:
-    """Returns the queued responses in order; records every call."""
+    """Returns the queued responses in order; records every call.
 
-    def __init__(self, responses: list[FakeResponse]):
+    A queued item that is a `BaseException` instance is raised instead of returned, which lets
+    tests exercise the client's network-error retry path.
+    """
+
+    def __init__(self, responses: list):
         self._responses = list(responses)
         self.calls: list[tuple] = []
 
+    def _next(self):
+        item = self._responses.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
     def get(self, url, **kwargs):
         self.calls.append(("GET", url, kwargs))
-        return self._responses.pop(0)
+        return self._next()
 
     def request(self, method, url, **kwargs):
         self.calls.append((method, url, kwargs))
-        return self._responses.pop(0)
+        return self._next()
 
 
 def make_config(**over) -> Config:
     base = dict(
         monobank_token="m", firefly_url="http://app:8080", firefly_token="f",
+        firefly_timeout=60, firefly_apply_rules=True,
         poll_interval_minutes=5, backfill=True, backfill_floor_date="2023-05-01",
         mcc_categories=False, timezone="Europe/Kyiv", log_level="info", db_path=":memory:",
     )
