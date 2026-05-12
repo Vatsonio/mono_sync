@@ -155,3 +155,62 @@ class Syncer:
         )
         log.info("opening balance set: account=%s firefly=%s -> %s on %s",
                  acc["mono_account_id"], acc["firefly_account_id"], opening, date_str)
+
+    # ------------------------------------------------------------------ incremental
+    def incremental_cycle(self) -> None:
+        for acc in self.store.all_accounts():
+            self._incremental_account(acc)
+        self._maybe_reconcile()
+
+    def _incremental_account(self, acc) -> None:
+        mono_id = acc["mono_account_id"]
+        now = self._now()
+        last = acc["last_synced_time"] or 0
+        # Resume from just before the last seen item (overlap catches late items / hold settlements).
+        # On a fresh install with no backfill there is nothing to resume from, so grab the last window.
+        start = (last - _OVERLAP_SECONDS) if last else (now - _WINDOW_SECONDS)
+        max_seen = last
+        created = updated = failed = 0
+        a = start
+        while a < now:
+            b = min(a + _WINDOW_SECONDS, now)
+            for it in self._fetch_chunk(mono_id, a, b):
+                outcome = self._ingest_item(acc, it)
+                created += outcome == "created"
+                updated += outcome == "updated"
+                failed += outcome == "failed"
+                if it["time"] > max_seen:
+                    max_seen = it["time"]
+            a = b
+        if max_seen > last:
+            self.store.set_last_synced_time(mono_id, max_seen)
+        log.info("incremental account=%s: %d new, %d updated, %d failed", mono_id, created, updated, failed)
+
+    # ------------------------------------------------------------------ balance reconciliation
+    def _maybe_reconcile(self) -> None:
+        last = self.store.get_state("last_reconcile_ts")
+        now = self._now()
+        if last is not None and now - int(last) < _RECONCILE_INTERVAL:
+            return
+        try:
+            info = self.mono.client_info()
+        except Exception as exc:  # noqa: BLE001 - reconciliation is best-effort
+            log.warning("reconcile: client-info failed: %s", exc)
+            return
+        by_id = {a["id"]: a for a in info.get("accounts", [])}
+        for acc in self.store.all_accounts():
+            mono_acc = by_id.get(acc["mono_account_id"])
+            if mono_acc is None:
+                continue
+            mono_balance = (mono_acc.get("balance") or 0) / 100
+            try:
+                ff_balance = self.ff.get_account_balance(acc["firefly_account_id"])
+            except FireflyError as exc:
+                log.warning("reconcile: Firefly balance failed for %s: %s", acc["firefly_account_id"], exc)
+                continue
+            if abs(mono_balance - ff_balance) > 0.01:
+                log.warning("balance mismatch account=%s: Monobank=%.2f Firefly=%.2f (diff=%.2f)",
+                            acc["mono_account_id"], mono_balance, ff_balance, mono_balance - ff_balance)
+            else:
+                log.info("balance ok account=%s: %.2f", acc["mono_account_id"], mono_balance)
+        self.store.set_state("last_reconcile_ts", str(now))
