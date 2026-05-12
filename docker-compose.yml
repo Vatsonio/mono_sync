@@ -1,0 +1,27 @@
+services:
+  monobank-sync:
+    image: ghcr.io/vatsonio/mono_sync:latest
+    container_name: monobank-firefly-sync
+    restart: unless-stopped
+    environment:
+      MONOBANK_TOKEN: ${MONOBANK_TOKEN}
+      FIREFLY_URL: ${FIREFLY_URL}
+      FIREFLY_TOKEN: ${FIREFLY_TOKEN}
+      POLL_INTERVAL_MINUTES: ${POLL_INTERVAL_MINUTES:-5}
+      BACKFILL: ${BACKFILL:-true}
+      BACKFILL_FLOOR_DATE: ${BACKFILL_FLOOR_DATE:-2023-05-01}
+      MCC_CATEGORIES: ${MCC_CATEGORIES:-false}
+      TZ: ${TZ:-Europe/Kyiv}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - monobank-sync-data:/data
+    networks:
+      - firefly
+
+volumes:
+  monobank-sync-data:
+
+networks:
+  firefly:
+    external: true
+    name: ${FIREFLY_NETWORK:-firefly_default}
