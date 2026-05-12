@@ -105,3 +105,53 @@ class Syncer:
             hash=new_hash, status="ok",
         )
         return outcome
+
+    # ------------------------------------------------------------------ statement fetching
+    def _fetch_chunk(self, account_id: str, frm: int, to: int) -> list:
+        """Fetch all statement items in [frm, to], splitting the window if Monobank caps the response at 500."""
+        items = self.mono.statement(account_id, frm, to)
+        if len(items) >= 500 and (to - frm) > 1:
+            mid = frm + (to - frm) // 2
+            return self._fetch_chunk(account_id, frm, mid) + self._fetch_chunk(account_id, mid, to)
+        return items
+
+    # ------------------------------------------------------------------ backfill
+    def run_backfill(self) -> None:
+        floor_ts = int(datetime.strptime(self.cfg.backfill_floor_date, "%Y-%m-%d").replace(tzinfo=self._tz).timestamp())
+        for acc in self.store.all_accounts():
+            if acc["backfill_complete"]:
+                continue
+            self._backfill_account(acc, floor_ts)
+
+    def _backfill_account(self, acc, floor_ts: int) -> None:
+        mono_id = acc["mono_account_id"]
+        cursor = acc["backfill_cursor"] if acc["backfill_cursor"] is not None else self._now()
+        log.info("backfill starting: account=%s cursor=%s floor=%s", mono_id, cursor, floor_ts)
+        while cursor > floor_ts:
+            frm = max(cursor - _WINDOW_SECONDS, floor_ts)
+            items = self._fetch_chunk(mono_id, frm, cursor)
+            created = updated = 0
+            for it in items:
+                outcome = self._ingest_item(acc, it)
+                created += outcome == "created"
+                updated += outcome == "updated"
+            log.info("backfill window account=%s [%s,%s]: %d items (%d new, %d updated)",
+                     mono_id, frm, cursor, len(items), created, updated)
+            cursor = frm
+            self.store.set_backfill_cursor(mono_id, cursor)
+        self._set_opening_balance(acc)
+        self.store.set_backfill_complete(mono_id, True)
+        log.info("backfill complete: account=%s", mono_id)
+
+    def _set_opening_balance(self, acc) -> None:
+        oldest = self.store.oldest_transaction(acc["mono_account_id"])
+        if oldest is None or oldest["balance_minor"] is None:
+            return
+        opening_minor = oldest["balance_minor"] - oldest["amount_minor"]
+        opening = f"{opening_minor / 100:.2f}"
+        date_str = (datetime.fromtimestamp(oldest["time"], self._tz).date() - timedelta(days=1)).isoformat()
+        self.ff.update_asset_account_opening_balance(
+            acc["firefly_account_id"], opening_balance=opening, opening_balance_date=date_str,
+        )
+        log.info("opening balance set: account=%s firefly=%s -> %s on %s",
+                 acc["mono_account_id"], acc["firefly_account_id"], opening, date_str)
